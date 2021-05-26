@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 #include <chrono>
+#include <immintrin.h>
 using namespace std;
 
 int main(int argc, char** argv) {
@@ -12,6 +13,18 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
   const int N = 4096;
+  const int nc = 512; // <=K (N/size)
+  const int kc = 64; // <=N
+  const int mc = 256; // <=K
+  const int nr = 64;  // <=nc && multiple of 8
+  const int mr = 32;  // <=mc
+// subA[K][N] <- A[K+offset][N]
+// subB[N][K] <- B[N][K+offset]
+// Ac[mc][kc] <- subA[mc+ic][kc+pc]
+// Bc[kc][nc] <- subB[kc+pc][nc+jc]
+// microA[mr][kc] <- Ac[mr+ir][kc]
+// microB[kc][nr] <- Bc[kc][nr+jr]
+  
   vector<float> A(N*N);
   vector<float> B(N*N);
   vector<float> C(N*N, 0);
@@ -24,24 +37,63 @@ int main(int argc, char** argv) {
       B[N*i+j] = drand48();
     }
   }
-  int offset = N/size*rank;
-  for (int i=0; i<N/size; i++)
+  int K = N/size;
+  int offset = K*rank;
+  for (int i=0; i<K; i++)
     for (int j=0; j<N; j++)
       subA[N*i+j] = A[N*(i+offset)+j];
   for (int i=0; i<N; i++)
-    for (int j=0; j<N/size; j++)
-      subB[N/size*i+j] = B[N*i+j+offset];
+    for (int j=0; j<K; j++)
+      subB[K*i+j] = B[N*i+j+offset];
   int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
 
   double comp_time = 0, comm_time = 0;
   for(int irank=0; irank<size; irank++) {
     auto tic = chrono::steady_clock::now();
-    offset = N/size*((rank+irank) % size);
-    for (int i=0; i<N/size; i++)
-      for (int j=0; j<N/size; j++)
-        for (int k=0; k<N; k++)
-          subC[N*i+j+offset] += subA[N*i+k] * subB[N/size*k+j];
+    offset = K*((rank+irank) % size);
+#pragma omp parallel  for collapse(2)
+    for (int jc=0; jc<K; jc+=nc) {
+      for (int pc=0; pc<N; pc+=kc) {
+	float Bc[kc*nc];
+	for (int p=0; p<kc; p++) {
+	  for (int j=0; j<nc; j++) {
+	    Bc[p*nc+j] = subB[(p+pc)*K+j+jc];
+	  }
+	}
+	for (int ic=0; ic<K; ic+=mc) {
+	  float Ac[mc*kc],Cc[mc*nc];
+	  for (int i=0; i<mc; i++) {
+	    for (int p=0; p<kc; p++) {
+	      Ac[i*kc+p] = subA[(i+ic)*N+p+pc];
+	    }
+	    for (int j=0; j<nc; j++) {
+	      Cc[i*nc+j] = 0;
+	    }
+	  }
+	  for (int jr=0; jr<nc; jr+=nr) {
+	    for (int ir=0; ir<mc; ir+=mr) {
+	      for (int kr=0; kr<kc; kr++) {
+		for (int i=ir; i<ir+mr; i++) {
+		  __m256 Avec = _mm256_broadcast_ss(Ac+i*kc+kr);
+		  for (int j=jr; j<jr+nr; j+=8) {
+		    __m256 Bvec = _mm256_load_ps(Bc+kr*nc+j);
+		    __m256 Cvec = _mm256_load_ps(Cc+i*nc+j);
+		    Cvec = _mm256_fmadd_ps(Avec, Bvec, Cvec);
+		    _mm256_store_ps(Cc+i*nc+j, Cvec);
+		  }
+		}
+	      }
+	    }
+	  }
+	  for (int i=0; i<mc; i++) {
+	    for (int j=0; j<nc; j++) {
+	      subC[(i+ic)*N+j+jc+offset] += Cc[i*nc+j];
+	    }
+	  }
+	}
+      }
+    }
     auto toc = chrono::steady_clock::now();
     comp_time += chrono::duration<double>(toc - tic).count();
     MPI_Request request[2];
