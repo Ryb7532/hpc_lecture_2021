@@ -12,25 +12,24 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
   const int N = 4096;
-  vector<float> A(N*N);
-  vector<float> B(N*N);
+  vector<float> A(N*N, 0);
+  vector<float> B(N*N, 0);
   vector<float> C(N*N, 0);
   vector<float> subA(N*N/size);
   vector<float> subB(N*N/size);
   vector<float> subC(N*N/size, 0);
-  for (int i=0; i<N; i++) {
-    for (int j=0; j<N; j++) {
-      A[N*i+j] = drand48();
-      B[N*i+j] = drand48();
-    }
-  }
+ 
   int offset = N/size*rank;
+  srand48(rank);
   for (int i=0; i<N/size; i++)
     for (int j=0; j<N; j++)
-      subA[N*i+j] = A[N*(i+offset)+j];
+      subA[N*i+j] = drand48();
   for (int i=0; i<N; i++)
     for (int j=0; j<N/size; j++)
-      subB[N/size*i+j] = B[N*i+j+offset];
+      subB[N/size*i+j] = drand48();
+  MPI_Allgather(&subA[0], N*N/size, MPI_FLOAT, &A[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
+  MPI_Allgather(&subB[0], N*N/size, MPI_FLOAT, &B[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
+
   int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
 
@@ -44,10 +43,12 @@ int main(int argc, char** argv) {
           subC[N*i+j+offset] += subA[N*i+k] * subB[N/size*k+j];
     auto toc = chrono::steady_clock::now();
     comp_time += chrono::duration<double>(toc - tic).count();
+    vector<float> recv(N*N/size, 0);
     MPI_Request request[2];
     MPI_Isend(&subB[0], N*N/size, MPI_FLOAT, send_to, 0, MPI_COMM_WORLD, &request[0]);
-    MPI_Irecv(&subB[0], N*N/size, MPI_FLOAT, recv_from, 0, MPI_COMM_WORLD, &request[1]);
+    MPI_Irecv(&recv[0], N*N/size, MPI_FLOAT, recv_from, 0, MPI_COMM_WORLD, &request[1]);
     MPI_Waitall(2, request, MPI_STATUS_IGNORE);
+    subB.swap(recv);
     tic = chrono::steady_clock::now();
     comm_time += chrono::duration<double>(tic - toc).count();
   }

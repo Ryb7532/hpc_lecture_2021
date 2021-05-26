@@ -13,8 +13,8 @@ int main(int argc, char** argv) {
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
   const int N = 4096;
-  const int nc = 512; // <=K (N/size)
-  const int kc = 64; // <=N
+  const int kc = 512; // <=K (N/size)
+  const int nc = 64; // <=N
   const int mc = 256; // <=K
   const int nr = 64;  // <=nc && multiple of 8
   const int mr = 32;  // <=mc
@@ -25,34 +25,33 @@ int main(int argc, char** argv) {
 // microA[mr][kc] <- Ac[mr+ir][kc]
 // microB[kc][nr] <- Bc[kc][nr+jr]
   
-  vector<float> A(N*N);
-  vector<float> B(N*N);
+  vector<float> A(N*N, 0);
+  vector<float> B(N*N, 0);
   vector<float> C(N*N, 0);
   vector<float> subA(N*N/size);
   vector<float> subB(N*N/size);
   vector<float> subC(N*N/size, 0);
-  for (int i=0; i<N; i++) {
-    for (int j=0; j<N; j++) {
-      A[N*i+j] = drand48();
-      B[N*i+j] = drand48();
-    }
-  }
   int K = N/size;
   int offset = K*rank;
+  srand48(rank);
   for (int i=0; i<K; i++)
     for (int j=0; j<N; j++)
-      subA[N*i+j] = A[N*(i+offset)+j];
+      subA[N*i+j] = drand48();
   for (int i=0; i<N; i++)
     for (int j=0; j<K; j++)
-      subB[K*i+j] = B[N*i+j+offset];
+      subB[K*i+j] = drand48();
+  MPI_Allgather(&subA[0], N*N/size, MPI_FLOAT, &A[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
+  MPI_Allgather(&subB[0], N*N/size, MPI_FLOAT, &B[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
+
   int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
 
   double comp_time = 0, comm_time = 0;
+#pragma omp single
   for(int irank=0; irank<size; irank++) {
     auto tic = chrono::steady_clock::now();
     offset = K*((rank+irank) % size);
-#pragma omp parallel  for collapse(2)
+#pragma omp parallel for collapse(2)
     for (int jc=0; jc<K; jc+=nc) {
       for (int pc=0; pc<N; pc+=kc) {
 	float Bc[kc*nc];
@@ -96,10 +95,12 @@ int main(int argc, char** argv) {
     }
     auto toc = chrono::steady_clock::now();
     comp_time += chrono::duration<double>(toc - tic).count();
+    vector<float> recv(N*N/size, 0);
     MPI_Request request[2];
     MPI_Isend(&subB[0], N*N/size, MPI_FLOAT, send_to, 0, MPI_COMM_WORLD, &request[0]);
-    MPI_Irecv(&subB[0], N*N/size, MPI_FLOAT, recv_from, 0, MPI_COMM_WORLD, &request[1]);
+    MPI_Irecv(&recv[0], N*N/size, MPI_FLOAT, recv_from, 0, MPI_COMM_WORLD, &request[1]);
     MPI_Waitall(2, request, MPI_STATUS_IGNORE);
+    subB.swap(recv);
     tic = chrono::steady_clock::now();
     comm_time += chrono::duration<double>(tic - toc).count();
   }
@@ -111,6 +112,7 @@ int main(int argc, char** argv) {
     printf("comm : %lf s\n", comm_time);
     printf("total: %lf s (%lf GFlops)\n",time,2.*N*N*N/time/1e9);
 
+#pragma omp parallel for
     for (int i=0; i<N; i++)
       for (int k=0; k<N; k++)
 	for (int j=0; j<N; j++)
