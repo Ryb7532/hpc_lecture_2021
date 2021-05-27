@@ -12,59 +12,61 @@ int main(int argc, char** argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &size);
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-  const int N = 4096;
-  const int kc = 512; // <=K (N/size)
-  const int nc = 64; // <=N
-  const int mc = 256; // <=K
-  const int nr = 64;  // <=nc && multiple of 8
-  const int mr = 32;  // <=mc
+  const int N = 8192;
+  const int kc = 512;
+  const int nc = 64;
+  const int mc = 256;
+  const int nr = 64;
+  const int mr = 32;
 // subA[K][N] <- A[K+offset][N]
 // subB[N][K] <- B[N][K+offset]
 // Ac[mc][kc] <- subA[mc+ic][kc+pc]
 // Bc[kc][nc] <- subB[kc+pc][nc+jc]
 // microA[mr][kc] <- Ac[mr+ir][kc]
 // microB[kc][nr] <- Bc[kc][nr+jr]
-  
-  vector<float> A(N*N, 0);
-  vector<float> B(N*N, 0);
+
+  vector<float> A(N*N);
+  vector<float> B(N*N);
   vector<float> C(N*N, 0);
   vector<float> subA(N*N/size);
   vector<float> subB(N*N/size);
   vector<float> subC(N*N/size, 0);
-  int K = N/size;
-  int offset = K*rank;
-  srand48(rank);
-  for (int i=0; i<K; i++)
+  for (int i=0; i<N; i++) {
+    for (int j=0; j<N; j++) {
+      A[N*i+j] = drand48();
+      B[N*i+j] = drand48();
+    }
+  }
+  int offset = N/size*rank;
+
+  for (int i=0; i<N/size; i++)
     for (int j=0; j<N; j++)
-      subA[N*i+j] = drand48();
+      subA[N*i+j] = A[N*(i+offset)+j];
   for (int i=0; i<N; i++)
-    for (int j=0; j<K; j++)
-      subB[K*i+j] = drand48();
-  MPI_Allgather(&subA[0], N*N/size, MPI_FLOAT, &A[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
-  MPI_Allgather(&subB[0], N*N/size, MPI_FLOAT, &B[0], N*N/size, MPI_FLOAT, MPI_COMM_WORLD);
+    for (int j=0; j<N/size; j++)
+      subB[N/size*i+j] = B[N*i+j+offset];
 
   int recv_from = (rank + 1) % size;
   int send_to = (rank - 1 + size) % size;
 
   double comp_time = 0, comm_time = 0;
-#pragma omp single
   for(int irank=0; irank<size; irank++) {
     auto tic = chrono::steady_clock::now();
-    offset = K*((rank+irank) % size);
+    offset = N/size*((rank+irank) % size);
 #pragma omp parallel for collapse(2)
-    for (int jc=0; jc<K; jc+=nc) {
+    for (int jc=0; jc<N/size; jc+=nc) {
       for (int pc=0; pc<N; pc+=kc) {
 	float Bc[kc*nc];
 	for (int p=0; p<kc; p++) {
 	  for (int j=0; j<nc; j++) {
-	    Bc[p*nc+j] = subB[(p+pc)*K+j+jc];
+	    Bc[p*nc+j] = subB[N/size*(p+pc)+j+jc];
 	  }
 	}
-	for (int ic=0; ic<K; ic+=mc) {
+	for (int ic=0; ic<N/size; ic+=mc) {
 	  float Ac[mc*kc],Cc[mc*nc];
 	  for (int i=0; i<mc; i++) {
 	    for (int p=0; p<kc; p++) {
-	      Ac[i*kc+p] = subA[(i+ic)*N+p+pc];
+	      Ac[i*kc+p] = subA[N*(i+ic)+p+pc];
 	    }
 	    for (int j=0; j<nc; j++) {
 	      Cc[i*nc+j] = 0;
@@ -87,7 +89,8 @@ int main(int argc, char** argv) {
 	  }
 	  for (int i=0; i<mc; i++) {
 	    for (int j=0; j<nc; j++) {
-	      subC[(i+ic)*N+j+jc+offset] += Cc[i*nc+j];
+#pragma omp atomic
+	      subC[N*(i+ic)+j+jc+offset] += Cc[i*nc+j];
 	    }
 	  }
 	}
